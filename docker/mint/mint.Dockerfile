@@ -25,7 +25,8 @@ RUN apt-get update && apt-get install -y python3-pip nano net-tools tcpdump ipro
     && apt-get clean && rm -r /var/lib/apt/lists/*
 
 # RUN apt-get install python3
-RUN pip3 install -r requirements.txt
+# TODO: Move to requirements.txt
+RUN pip3 install flask flask_limiter gunicorn pexpect
 
 RUN mkdir -p /opt/libra/bin /opt/libra/etc /libra/client/data/wallet/
 
