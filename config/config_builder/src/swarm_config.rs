@@ -6,11 +6,14 @@ use crate::util::gen_genesis_transaction;
 use config::{
     config::{BaseConfig, KeyPairs, NodeConfig, NodeConfigHelpers, RoleType, VMPublishingOption},
     seed_peers::{SeedPeersConfig, SeedPeersConfigHelpers},
-    trusted_peers::{TrustedPeersConfig, TrustedPeersConfigHelpers},
+    trusted_peers::{TrustedPeerPrivateKeys, TrustedPeersConfig, TrustedPeersConfigHelpers},
 };
 use failure::prelude::*;
 use nextgen_crypto::{ed25519::*, test_utils::KeyPair};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 /// Topology indicates the shape of the validator network
 /// Currently does not handle full nodes, the launch_swarm will only use num_nodes value
@@ -55,7 +58,6 @@ pub struct SwarmConfig {
 }
 
 impl SwarmConfig {
-    //TODO convert this to use the Builder paradigm
     pub fn new(
         mut template: NodeConfig,
         topology: &LibraSwarmTopology,
@@ -65,18 +67,13 @@ impl SwarmConfig {
         key_seed: Option<[u8; 32]>,
         output_dir: &Path,
     ) -> Result<Self> {
-        // Generate trusted peer configs + their private keys.
-        template.base.data_dir_path = output_dir.into();
-        let (mut peers_private_keys, trusted_peers_config) =
-            TrustedPeersConfigHelpers::get_test_config(topology.num_validators(), key_seed);
-        let trusted_peers_file = template.base.trusted_peers_file.clone();
-        let seed_peers_file = template.network.seed_peers_file.clone();
-        trusted_peers_config.save_config(&output_dir.join(&trusted_peers_file));
-        let mut seed_peers_config = SeedPeersConfigHelpers::get_test_config_with_ipver(
-            &trusted_peers_config,
-            None,
-            is_ipv4,
-        );
+        let (trusted_peers_file, trusted_peers_config, peers_private_keys) =
+            SwarmConfig::building_trusted_peers_config(
+                &mut template,
+                &output_dir,
+                &topology,
+                key_seed,
+            );
 
         gen_genesis_transaction(
             &output_dir.join(&template.execution.genesis_file_location),
@@ -84,7 +81,70 @@ impl SwarmConfig {
             &trusted_peers_config,
         )?;
 
-        let num_full_nodes = topology.num_full_nodes();
+        let (seed_peers_file, mut seed_peers_config) =
+            SwarmConfig::building_seed_peers_config(&template, &trusted_peers_config, is_ipv4);
+        let configs = SwarmConfig::building_each_node_config(
+            &template,
+            &output_dir,
+            prune_seed_peers_for_discovery,
+            &seed_peers_file,
+            &mut seed_peers_config,
+            &trusted_peers_file,
+            peers_private_keys,
+            static_ports,
+        );
+
+        Ok(Self {
+            configs,
+            seed_peers: (output_dir.join(seed_peers_file), seed_peers_config),
+            trusted_peers: (output_dir.join(trusted_peers_file), trusted_peers_config),
+        })
+    }
+
+    fn building_trusted_peers_config(
+        template: &mut NodeConfig,
+        output_dir: &Path,
+        topology: &LibraSwarmTopology,
+        key_seed: Option<[u8; 32]>,
+    ) -> (
+        String,
+        TrustedPeersConfig,
+        HashMap<String, TrustedPeerPrivateKeys>,
+    ) {
+        template.base.data_dir_path = output_dir.into();
+        let (peers_private_keys, trusted_peers_config) =
+            TrustedPeersConfigHelpers::get_test_config(topology.num_validators(), key_seed);
+        let trusted_peers_file = template.base.trusted_peers_file.clone();
+        trusted_peers_config.save_config(&output_dir.join(&trusted_peers_file));
+
+        (trusted_peers_file, trusted_peers_config, peers_private_keys)
+    }
+
+    fn building_seed_peers_config(
+        template: &NodeConfig,
+        trusted_peers_config: &TrustedPeersConfig,
+        is_ipv4: bool,
+    ) -> (String, SeedPeersConfig) {
+        let seed_peers_file = template.network.seed_peers_file.clone();
+        let seed_peers_config = SeedPeersConfigHelpers::get_test_config_with_ipver(
+            &trusted_peers_config,
+            None,
+            is_ipv4,
+        );
+
+        (seed_peers_file, seed_peers_config)
+    }
+
+    fn building_each_node_config(
+        template: &NodeConfig,
+        output_dir: &Path,
+        prune_seed_peers_for_discovery: bool,
+        seed_peers_file: &str,
+        seed_peers_config: &mut SeedPeersConfig,
+        trusted_peers_file: &str,
+        mut peers_private_keys: HashMap<String, TrustedPeerPrivateKeys>,
+        static_ports: bool,
+    ) -> (Vec<(PathBuf, NodeConfig)>) {
         let mut configs = Vec::new();
         // Generate configs for all nodes.
         for (node_id, addrs) in &seed_peers_config.seed_peers {
@@ -145,16 +205,11 @@ impl SwarmConfig {
                 (config_file, config)
             })
             .collect::<Vec<(PathBuf, NodeConfig)>>();
-
         for (path, node_config) in &configs {
             node_config.save_config(&path);
         }
 
-        Ok(Self {
-            configs,
-            seed_peers: (output_dir.join(seed_peers_file), seed_peers_config),
-            trusted_peers: (output_dir.join(trusted_peers_file), trusted_peers_config),
-        })
+        (configs)
     }
 
     pub fn get_configs(&self) -> &[(PathBuf, NodeConfig)] {
